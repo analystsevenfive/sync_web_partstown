@@ -1,0 +1,14 @@
+# Dependencies & Python Cache
+__pycache__/
+*.pyc
+
+# Data & Output files
+*.db
+*.json
+*.csv
+exports/
+_temp_*
+
+# Test scripts (ไม่เอาขึ้น GitHub)
+scrape_apple_*.py
+test_apple_*.py
