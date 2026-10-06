@@ -7,6 +7,8 @@ __pycache__/
 *.json
 *.csv
 exports/
+.partstown-profile/
+.partstown-cdp-profile/
 _temp_*
 
 # Test scripts (ไม่เอาขึ้น GitHub)

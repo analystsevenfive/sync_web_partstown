@@ -1,0 +1,38 @@
+name: Trial sync Parts Town page 1 to Google Sheets
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Runs daily at 02:15 UTC (09:15 Asia/Bangkok).
+    - cron: "15 2 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: partstown-google-sheets-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: requirements-github-actions.txt
+      - name: Install dependencies
+        run: python -m pip install -r requirements-github-actions.txt
+      - name: Sync first 24 Bakers Pride products from public sitemap
+        run: python partstown_sync.py --brand bakers-pride --limit 24 --delay 1 --workers 1
+      - name: Publish trial results to Google Sheets
+        env:
+          GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+        run: python google_sheets_sync.py
+      - name: Note account-specific pricing limitation
+        run: |
+          echo "This trial sync is limited to the first 24 Bakers Pride products from the public product sitemap. My Price and signed-in stock data are not fetched because the GitHub runner has no Parts Town browser session." >> "$GITHUB_STEP_SUMMARY"
