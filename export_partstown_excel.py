@@ -21,27 +21,44 @@ HEADERS = [
 ]
 
 
-def main() -> None:
+def main(brand: str = "Bakers Pride", output_file: str | None = None, product_ids: list[str] | None = None) -> None:
     partstown_sync.init_db()
-    OUTPUT_FILE.parent.mkdir(parents=True, exist_ok=True)
+    destination = Path(output_file) if output_file else BASE_DIR / "exports" / "partstown_bakers_pride_page1_with_fits_specs.xlsx"
+    if not destination.is_absolute():
+        destination = BASE_DIR / destination
+    destination.parent.mkdir(parents=True, exist_ok=True)
     workbook = Workbook()
     sheet = workbook.active
-    sheet.title = "Bakers Pride page 1"
+    sheet.title = (brand[:31] or "Parts Town")
     sheet.append(HEADERS)
     sheet.freeze_panes = "A2"
     sheet.auto_filter.ref = f"A1:{get_column_letter(len(HEADERS))}1"
 
-    with sqlite3.connect(partstown_sync.DB_FILE) as conn:
-        rows = conn.execute("""SELECT id,title,brand,manufacturer,sku,price,my_price,availability,
-            previous_part_numbers,units,fits_models,fits_model_count,fits_models_url,prop65_warning,
-            url,image,raw_json,synced_at FROM products ORDER BY rowid""").fetchall()
-
+    query = """SELECT id,title,brand,manufacturer,sku,price,my_price,availability,
+        previous_part_numbers,units,fits_models,fits_model_count,fits_models_url,prop65_warning,
+        url,image,raw_json,synced_at FROM products WHERE lower(brand)=lower(?)"""
+    params: list[str] = [brand]
+    if product_ids is not None:
+        if not product_ids:
+            rows = []
+        else:
+            query += " AND id IN (" + ",".join("?" for _ in product_ids) + ")"
+            params.extend(product_ids)
+    query += " ORDER BY rowid"
+    if product_ids is not None and not product_ids:
+        rows = []
+    else:
+        with sqlite3.connect(partstown_sync.DB_FILE) as conn:
+            rows = conn.execute(query, params).fetchall()
     for row in rows:
         meta = json.loads(row[16]) if row[16] else {}
         model_list = meta.get("pdp_tabs", {}).get("fits_models_list", [])
         fits_model_text = ", ".join(str(model) for model in model_list) if isinstance(model_list, list) else ""
         notes = ""
-        if row[0] == "BKP2V-R3104A":
+        replacement = meta.get("replacement_snapshot", {})
+        if replacement.get("parts_town_number"):
+            notes = f"Price and availability reflect replacement part {replacement['parts_town_number']} linked to this Crown Steam listing."
+        elif row[0] == "BKP2V-R3104A":
             notes = "Previous part numbers are the 4 values visible before the PDP Show More control."
         elif not row[8] and not row[10] and not row[13]:
             notes = "Full model compatibility list was not captured; source only provided the model count and the product page is currently behind Cloudflare verification."
@@ -78,8 +95,8 @@ def main() -> None:
         sheet.column_dimensions[get_column_letter(index)].width = width
     for row_idx in range(2, sheet.max_row + 1):
         sheet.row_dimensions[row_idx].height = 60 if sheet.cell(row_idx, 14).value else 30
-    workbook.save(OUTPUT_FILE)
-    print(f"Created {OUTPUT_FILE} with {sheet.max_row - 1} product rows.")
+    workbook.save(destination)
+    print(f"Created {destination} with {sheet.max_row - 1} product rows.")
 
 
 if __name__ == "__main__":

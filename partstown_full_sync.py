@@ -30,7 +30,9 @@ BASE_DIR = Path(__file__).resolve().parent
 PROFILE_DIR = BASE_DIR / ".partstown-profile"
 CDP_PROFILE_DIR = BASE_DIR / ".partstown-cdp-profile"
 BRAND_URL = "https://www.partstown.com/b/bakers-pride"
-IMAGE_CODES = {"bakers-pride": "BKP", "star": "STA", "magikitchn": "MK", "apw-wyott": "APW"}
+BRAND_NAME = "Bakers Pride"
+IMAGE_CODES = {"bakers-pride": "BKP", "star": "STA", "magikitchn": "MK", "apw-wyott": "APW", "middleby": "MD", "pitco": "PT", "crown-steam": "CRWN", "market-forge": "MAR", "southbend-range": "SOU"}
+PART_NUMBER_IMAGE_CODES = {"CRWN": "CRWN", "MAR": "MAR", "SOU": "SOU", "PT": "PT", "MD": "MD", "BKP": "BKP", "STA": "STA", "APW": "APW", "MK": "MK"}
 PAGE_SIZE = 24
 
 
@@ -48,12 +50,18 @@ def start_regular_chrome(port: int) -> None:
     chrome = next((path for path in chrome_paths if path.exists()), None)
     if chrome is None:
         raise FileNotFoundError("Google Chrome was not found in Program Files.")
+    endpoint = f"http://127.0.0.1:{port}/json/version"
+    try:
+        with urlopen(endpoint, timeout=1) as response:
+            if response.status == 200:
+                return
+    except Exception:
+        pass
     CDP_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
     subprocess.Popen([
         str(chrome), f"--remote-debugging-port={port}", "--remote-allow-origins=*",
         f"--user-data-dir={CDP_PROFILE_DIR}", BRAND_URL,
     ])
-    endpoint = f"http://127.0.0.1:{port}/json/version"
     deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
         try:
@@ -69,11 +77,19 @@ def fallback_image_url(product: dict) -> str | None:
     if product.get("image_url"):
         return product["image_url"]
     slug = urlparse(product["url"]).path.split("/p/")[-1].split("/")[0]
-    code = IMAGE_CODES.get(slug)
     part_no = product.get("partstown_number")
+    code = image_code_for(slug, part_no)
     if code and part_no:
         return f"https://partstown.sirv.com/products/{code}/{part_no}.view?thumb&image.rules=G0&w=200"
     return None
+
+
+def image_code_for(brand_slug: str, partstown_number: str | None) -> str | None:
+    code = IMAGE_CODES.get(brand_slug)
+    if code:
+        return code
+    part = (partstown_number or "").upper()
+    return next((value for prefix, value in PART_NUMBER_IMAGE_CODES.items() if part.startswith(prefix)), None)
 
 
 async def extract_listing_items(page) -> list[dict]:
@@ -101,7 +117,7 @@ async def extract_listing_items(page) -> list[dict]:
           quantity_available: get(/(?:Quantity Available|Quantity)\\s*:?\\s*([\\d,]+)/i).replace(/,/g, ''),
           list_price_usd: get(/List Price\\s*:?\\s*\\$?([\\d,.]+)/i).replace(/,/g, ''),
           my_price_usd: get(/My Price\\s*:?\\s*\\$?([\\d,.]+)/i).replace(/,/g, ''),
-          availability: (text.match(/In Stock[^.]*|Out of Stock|Backordered|Unavailable/i) || [''])[0],
+          availability: (text.match(/In Stock[^.]*|Out of Stock|Backordered|Unavailable|Obsolete(?:, *replaced by [^.]*)?/i) || [''])[0],
           image_url: imgs[0] || '', brand_slug: brandSlug
         };
         if (!item.partstown_number) item.partstown_number = url.pathname.split('/').pop().toUpperCase();
@@ -155,7 +171,7 @@ def save_listing(product: dict, snapshot_date: str) -> None:
           sku=COALESCE(excluded.sku,products.sku),price=excluded.price,my_price=excluded.my_price,
           currency='USD',availability=excluded.availability,image=excluded.image,
           raw_json=excluded.raw_json,synced_at=datetime('now')""",
-          (product["partstown_number"], product["url"], product["title"], "Bakers Pride",
+          (product["partstown_number"], product["url"], product["title"], product.get("brand", BRAND_NAME),
            None, product.get("manufacturer_part_number") or None, None,
            product.get("list_price_usd") or None, product.get("my_price_usd") or None, "USD",
            (product.get("availability") or "") + (f" (quantity: {product['quantity_available']})" if product.get("quantity_available") else ""),
@@ -164,7 +180,13 @@ def save_listing(product: dict, snapshot_date: str) -> None:
 
 async def wait_for_signed_in(page, seconds: int) -> bool:
     for _ in range(max(1, seconds // 2)):
-        body = (await page.locator("body").inner_text(timeout=5000)).replace("\xa0", " ")
+        try:
+            body = (await page.locator("body").inner_text(timeout=5000)).replace("\xa0", " ")
+        except PlaywrightTimeoutError:
+            # During a Cloudflare interstitial the document may briefly have no
+            # readable body. Keep waiting so the user can finish verification.
+            await page.wait_for_timeout(2000)
+            continue
         if re.search(r"My Price\s*\$", body, re.I):
             return True
         await page.wait_for_timeout(2000)
@@ -218,10 +240,10 @@ async def scrape_listing_pages(context, max_pages: int | None, workers: int, del
                 if not cards:
                     raise RuntimeError(f"Failed after 3 attempts: {last_error}")
                 for card in cards:
-                    card["brand"] = "Bakers Pride"
+                    card["brand"] = BRAND_NAME
                     card["source_url"] = BRAND_URL
                     card["snapshot_date"] = snapshot
-                    code = IMAGE_CODES.get(card.pop("brand_slug", ""))
+                    code = image_code_for(card.pop("brand_slug", ""), card.get("partstown_number"))
                     card["image_url"] = card.get("image_url") or (
                         f"https://partstown.sirv.com/products/{code}/{card['partstown_number']}.view?thumb&image.rules=G0&w=200"
                         if code else "")
@@ -357,7 +379,7 @@ async def extract_product_details(page, product: dict) -> dict:
     list_price = parse_price(body, "List Price") or product.get("list_price_usd")
     my_price = parse_price(body, "My Price") or product.get("my_price_usd")
     return {
-        "manufacturer": manufacturer or product.get("brand", "Bakers Pride"),
+        "manufacturer": manufacturer or product.get("brand", BRAND_NAME),
         "manufacturer_part_number": mfr_no,
         "partstown_number": product["partstown_number"],
         "quantity_available": quantity,
@@ -452,7 +474,37 @@ async def enrich_products(context, products: list[dict], workers: int, delay: fl
     return done, failed
 
 
+def load_brand_products(brand: str) -> list[dict]:
+    """Load previously captured listing rows so PDP details can be resumed later."""
+    with sqlite3.connect(partstown_sync.DB_FILE) as conn:
+        rows = conn.execute(
+            "SELECT id,url,title,brand,sku,price,my_price,availability,image,raw_json FROM products WHERE lower(brand)=lower(?) ORDER BY rowid",
+            (brand,),
+        ).fetchall()
+    products = []
+    for row in rows:
+        meta = json.loads(row[9]) if row[9] else {}
+        item = meta.get("listing", {})
+        item.update({
+            "partstown_number": row[0], "url": row[1], "title": row[2], "brand": row[3],
+            "manufacturer_part_number": row[4], "list_price_usd": row[5], "my_price_usd": row[6],
+            "availability": (row[7] or "").split(" (quantity:", 1)[0], "image_url": row[8] or "",
+            "quantity_available": meta.get("quantity_available", ""),
+        })
+        products.append(item)
+    return products
+
+
 async def run(args) -> int:
+    global BRAND_URL, BRAND_NAME
+    BRAND_URL = args.brand_url or f"https://www.partstown.com/b/{args.brand_slug}"
+    BRAND_NAME = args.brand_name or args.brand_slug.replace("-", " ").title()
+    # Keep these brand catalogs separate when part IDs may be cross-listed.
+    # Keep catalogs separate when IDs can be cross-listed or shared.
+    # CTX uses Middleby MD numbers, while Pitco/Crown Steam use their own brands.
+    if args.brand_slug.casefold() in {"ctx", "pitco", "crown-steam"}:
+        partstown_sync.DB_FILE = BASE_DIR / f"partstown_{args.brand_slug.casefold()}_data.db"
+        partstown_sync.EXPORT_FILE = BASE_DIR / "exports" / f"partstown_{args.brand_slug.casefold()}_products.csv"
     partstown_sync.init_db()
     PROFILE_DIR.mkdir(parents=True, exist_ok=True)
     async with async_playwright() as playwright:
@@ -468,33 +520,67 @@ async def run(args) -> int:
                 str(PROFILE_DIR), headless=False, channel="chrome", viewport={"width": 1440, "height": 1000}
             )
         login_page = context.pages[0] if context.pages else await context.new_page()
-        await login_page.goto(BRAND_URL, wait_until="domcontentloaded", timeout=60000)
-        if cdp_mode:
-            print("Regular Chrome is open. Sign in and complete any site verification manually; sync waits for My Price.", flush=True)
+        products: list[dict] = []
+        done = failed = 0
+        if args.details_only:
+            products = load_brand_products(BRAND_NAME)
+            if not products:
+                raise RuntimeError(f"No saved listing rows found for {BRAND_NAME}; run listing sync first.")
+            await login_page.goto(BRAND_URL, wait_until="domcontentloaded", timeout=60000)
+            print(f"Loaded {len(products):,} saved {BRAND_NAME} products; waiting for sign-in/My Price before filling missing PDP details.", flush=True)
+            if not await wait_for_signed_in(login_page, args.login_timeout):
+                print("Timed out waiting for My Price. No credentials were entered or stored.", flush=True)
+                if not cdp_mode:
+                    await context.close()
+                return 2
+            detail_products = products[:args.max_products] if args.max_products else products
+            done, failed = await enrich_products(context, detail_products, args.workers, args.delay)
         else:
-            print("Chrome is open. Sign in manually if needed; the sync waits for My Price to appear.", flush=True)
-        if not await wait_for_signed_in(login_page, args.login_timeout):
-            print("Timed out waiting for the signed-in listing. No credentials were entered or stored.", flush=True)
-            if not cdp_mode:
-                await context.close()
-            return 2
-        products = await scrape_listing_pages(context, args.max_pages, args.workers, args.delay)
-        if args.max_products:
-            products = products[:args.max_products]
-        print("Listing sync complete. Enriching each product with Specs and the full Fits Models list.", flush=True)
-        detail_products = products[:args.max_products] if args.max_products else products
-        done, failed = await enrich_products(context, detail_products, args.workers, args.delay)
+            await login_page.goto(BRAND_URL, wait_until="domcontentloaded", timeout=60000)
+            if args.skip_details:
+                print("Listing-only mode: waiting for My Price, then saving catalog rows without PDP Specs/Fits Models.", flush=True)
+            else:
+                if cdp_mode:
+                    print("Regular Chrome is open. Sign in and complete any site verification manually; sync waits for My Price.", flush=True)
+                else:
+                    print("Chrome is open. Sign in manually if needed; the sync waits for My Price to appear.", flush=True)
+            if not await wait_for_signed_in(login_page, args.login_timeout):
+                print("Timed out waiting for My Price. No credentials were entered or stored.", flush=True)
+                if not cdp_mode:
+                    await context.close()
+                return 2
+            products = await scrape_listing_pages(context, args.max_pages, args.workers, args.delay)
+            if args.max_products:
+                products = products[:args.max_products]
+            if args.skip_details:
+                print("Listing sync complete. PDP enrichment skipped; rerun with --details-only to fill Specs and Fits Models (and refresh My Price).", flush=True)
+            else:
+                print("Listing sync complete. Enriching each product with Specs and the full Fits Models list.", flush=True)
+                detail_products = products[:args.max_products] if args.max_products else products
+                done, failed = await enrich_products(context, detail_products, args.workers, args.delay)
         if not cdp_mode:
             await context.close()
     partstown_sync.export_csv()
     from export_partstown_excel import main as export_excel
-    export_excel()
+    export_excel(
+        brand=BRAND_NAME,
+        output_file=args.output or f"exports/partstown_{args.brand_slug.replace('-', '_')}_with_fits_specs.xlsx",
+        product_ids=[p["partstown_number"] for p in products] if args.current_run_only else None,
+    )
     print(f"Finished: {len(products):,} listing products; enriched={done:,}; detail errors={failed:,}.", flush=True)
     return 0 if failed == 0 else 1
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Concurrent, resumable Parts Town Bakers Pride full sync.")
+    parser = argparse.ArgumentParser(description="Concurrent, resumable Parts Town brand sync.")
+    parser.add_argument("--brand-slug", default="bakers-pride", help="Parts Town brand URL slug (default: bakers-pride).")
+    parser.add_argument("--brand-name", help="Brand name stored in the database and workbook; inferred from slug by default.")
+    parser.add_argument("--brand-url", help="Override brand listing URL, for catalogs with a nested route.")
+    parser.add_argument("--output", help="Workbook path, relative to this folder or absolute.")
+    parser.add_argument("--current-run-only", action="store_true", help="Limit the workbook to products captured in this invocation.")
+    stages = parser.add_mutually_exclusive_group()
+    stages.add_argument("--skip-details", action="store_true", help="Sync listing data only; skip PDP/My Price/Specs/Fits Models enrichment.")
+    stages.add_argument("--details-only", action="store_true", help="Enrich previously saved products without syncing listing pages again.")
     parser.add_argument("--max-pages", type=int, help="Optional page cap; default syncs all pages.")
     parser.add_argument("--max-products", type=int, help="Optional product cap for the detail stage.")
     parser.add_argument("--workers", type=int, default=3, help="Concurrent browser pages (1-4; default 3).")

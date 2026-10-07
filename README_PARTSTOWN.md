@@ -107,3 +107,32 @@ python partstown_full_sync.py --cdp --workers 2
 ```
 
 Output files are `partstown_data.db` and `exports/partstown_products.csv`. When the complete fits-model list is not shown inline, the script records the model count and “View Models List” link.
+
+
+## Export all saved brands to one Excel workbook
+
+Run this from the `universal-web-scraper` directory after syncing data:
+
+```powershell
+python export_partstown_all_brands.py
+```
+
+The script reads the saved SQLite databases and creates `exports/partstown_all_brands.xlsx`. Each brand has its own worksheet: Bakers Pride, Middleby, CTX, Pitco, and Crown Steam. The workbook includes product links, image links, List Price, My Price, quantity, previous part numbers, Fits Models, Specs, and other saved product fields. Missing databases are skipped.
+
+To choose a different output path:
+
+```powershell
+python export_partstown_all_brands.py --output "exports/partstown_all_brands.xlsx"
+```
+
+The `exports/` directory is ignored by Git, so generated workbooks remain local. In particular, My Price can be account-specific; keep the workbook out of a shared repository unless it is appropriate to publish those prices.
+
+## Backfill prices from product pages
+
+After signing in and completing any site verification in the regular Chrome session, run:
+
+```powershell
+python partstown_price_backfill.py --workers 4 --delay 0.25
+```
+
+This visits saved product pages for the supported brands and checkpoints results in their SQLite databases. It does not retry rows previously checked without a price unless `--retry-attempted` is added. Export the combined workbook again after the backfill to refresh the Excel file.
